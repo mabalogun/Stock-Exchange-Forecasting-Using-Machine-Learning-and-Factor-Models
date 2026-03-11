@@ -1,0 +1,260 @@
+############################################################
+# STOCK EXCHANGE FORECASTING USING ML AND FACTOR MODELS
+# Evidence from the Nigerian Stock Exchange
+#
+# MSc Thesis Replication Script
+# Models:
+# 1. ARIMA (Benchmark)
+# 2. ANN
+# 3. PCR
+# 4. LSTM
+#
+# Author: Muhammad Balogun
+############################################################
+
+
+############################
+# 1. LOAD LIBRARIES
+############################
+
+packages <- c(
+"tidyverse",
+"forecast",
+"keras",
+"caret",
+"pls",
+"readxl",
+"Metrics"
+)
+
+install_if_missing <- function(pkg){
+  if(!require(pkg, character.only=TRUE)){
+    install.packages(pkg)
+    library(pkg, character.only=TRUE)
+  }
+}
+
+invisible(lapply(packages, install_if_missing))
+
+
+############################
+# 2. LOAD DATA
+############################
+
+data <- read_excel("data/tech_omit.xlsx")
+
+data$Date <- as.Date(data$Date)
+
+data <- data %>% arrange(Date)
+
+
+############################
+# 3. DEFINE VARIABLES
+############################
+
+features <- c(
+"SPX","IXIC","DJIA","FTSE","EXC","OIL",
+"CPI","MPR","INF","GDP",
+"Open","High","Low",
+"SMA_10","SMA_50","WMA_10","EMA","RSI"
+)
+
+target <- "ASI"
+
+
+############################
+# 4. TRAIN / TEST SPLIT
+############################
+
+train_end <- as.Date("2022-12-31")
+
+train_data <- data %>% filter(Date <= train_end)
+
+test_data <- data %>% filter(Date > train_end)
+
+
+############################
+# 5. ARIMA MODEL (BENCHMARK)
+############################
+
+asi_ts <- ts(train_data$ASI, frequency = 252)
+
+arima_model <- auto.arima(asi_ts)
+
+arima_forecast <- forecast(arima_model, h=nrow(test_data))
+
+arima_predictions <- as.numeric(arima_forecast$mean)
+
+arima_rmse <- rmse(arima_predictions, test_data$ASI)
+
+cat("ARIMA RMSE:", arima_rmse, "\n")
+
+
+############################
+# 6. ANN MODEL
+############################
+
+x_train <- train_data %>% select(all_of(features))
+y_train <- train_data$ASI
+
+x_test <- test_data %>% select(all_of(features))
+y_test <- test_data$ASI
+
+preprocess <- preProcess(x_train, method=c("center","scale"))
+
+x_train <- predict(preprocess, x_train)
+x_test <- predict(preprocess, x_test)
+
+
+ann_model <- keras_model_sequential() %>%
+layer_dense(units=64, activation="relu", input_shape=ncol(x_train)) %>%
+layer_dense(units=32, activation="relu") %>%
+layer_dense(units=1)
+
+ann_model %>% compile(
+loss="mean_squared_error",
+optimizer="adam",
+metrics=c("mean_absolute_error")
+)
+
+history <- ann_model %>% fit(
+as.matrix(x_train),
+y_train,
+epochs=100,
+validation_split=0.2,
+verbose=0
+)
+
+ann_predictions <- ann_model %>% predict(as.matrix(x_test))
+
+ann_rmse <- sqrt(mean((ann_predictions - y_test)^2))
+
+cat("ANN RMSE:", ann_rmse, "\n")
+
+
+############################
+# 7. PCR MODEL
+############################
+
+X_train_std <- scale(x_train)
+
+pcr_model <- pcr(
+y_train ~ .,
+data=as.data.frame(X_train_std),
+scale=TRUE,
+ncomp=10
+)
+
+X_test_std <- scale(x_test)
+
+pcr_predictions <- predict(
+pcr_model,
+newdata=as.data.frame(X_test_std)
+)
+
+pcr_predictions <- rowMeans(pcr_predictions)
+
+pcr_rmse <- sqrt(mean((pcr_predictions - y_test)^2))
+
+cat("PCR RMSE:", pcr_rmse, "\n")
+
+
+############################
+# 8. LSTM MODEL
+############################
+
+x_train_lstm <- array_reshape(
+as.matrix(x_train),
+c(nrow(x_train),1,ncol(x_train))
+)
+
+x_test_lstm <- array_reshape(
+as.matrix(x_test),
+c(nrow(x_test),1,ncol(x_test))
+)
+
+lstm_model <- keras_model_sequential() %>%
+bidirectional(
+layer_lstm(50, return_sequences=TRUE),
+input_shape=c(1,ncol(x_train))
+) %>%
+layer_dropout(0.2) %>%
+layer_batch_normalization() %>%
+bidirectional(layer_lstm(50)) %>%
+layer_dropout(0.2) %>%
+layer_dense(1)
+
+lstm_model %>% compile(
+optimizer="adam",
+loss="mse",
+metrics=c("mae")
+)
+
+history_lstm <- lstm_model %>% fit(
+x_train_lstm,
+y_train,
+epochs=50,
+batch_size=32,
+validation_split=0.2,
+verbose=0
+)
+
+lstm_predictions <- lstm_model %>% predict(x_test_lstm)
+
+lstm_rmse <- sqrt(mean((lstm_predictions - y_test)^2))
+
+cat("LSTM RMSE:", lstm_rmse, "\n")
+
+
+############################
+# 9. MODEL COMPARISON
+############################
+
+results <- data.frame(
+Model=c("ARIMA","ANN","PCR","LSTM"),
+RMSE=c(arima_rmse, ann_rmse, pcr_rmse, lstm_rmse)
+)
+
+print(results)
+
+write.csv(
+results,
+"objects/model_comparison.csv",
+row.names=FALSE
+)
+
+
+############################
+# 10. FORECAST PLOT
+############################
+
+forecast_df <- data.frame(
+Date=test_data$Date,
+Actual=test_data$ASI,
+ARIMA=arima_predictions,
+ANN=as.numeric(ann_predictions),
+PCR=pcr_predictions,
+LSTM=as.numeric(lstm_predictions)
+)
+
+forecast_long <- forecast_df %>%
+pivot_longer(-Date, names_to="Series", values_to="Value")
+
+ggplot(forecast_long, aes(Date,Value,color=Series))+
+geom_line()+
+theme_minimal()+
+labs(
+title="Forecast Comparison: NSE ASI",
+y="ASI",
+x=""
+)
+
+ggsave(
+"figures/model_forecast_comparison.png",
+width=10,
+height=6
+)
+
+############################################################
+# END
+############################################################
